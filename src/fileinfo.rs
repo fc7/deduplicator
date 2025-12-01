@@ -3,7 +3,6 @@ use gxhash::gxhash128;
 use memmap2::Mmap;
 use std::{
     fs,
-    fs::Metadata,
     io::Read,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -28,7 +27,6 @@ pub struct FileInfo {
     pub size: u64,
     pub modified: SystemTime,
     pub state: Arc<Mutex<FileState>>,
-    pub filemeta: Option<Metadata>,
     pub source: Option<FileSource>,
 }
 
@@ -63,7 +61,6 @@ impl FileInfo {
             size: filemeta.len(),
             modified: filemeta.modified()?,
             state: Arc::new(Mutex::new(FileState::Unprocessed)),
-            filemeta: Some(filemeta),
             source: None,
         })
     }

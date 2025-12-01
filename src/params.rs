@@ -79,8 +79,4 @@ impl Params {
             None => anyhow::bail!("--target-dir is required when using --comparison-mode"),
         }
     }
-
-    pub fn get_types(&self) -> Option<String> {
-        self.types.clone()
-    }
 }
