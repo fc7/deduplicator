@@ -82,7 +82,12 @@ impl Processor {
 
                             hw_store
                                 .entry(fhash)
-                                .and_modify(|fileset| fileset.push(file.clone()))
+                                .and_modify(|fileset| {
+                                    // Only add if this path doesn't already exist in the fileset
+                                    if !fileset.iter().any(|f| f.path == file.path) {
+                                        fileset.push(file.clone());
+                                    }
+                                })
                                 .or_insert_with(|| vec![file.clone()]);
                         });
                     };
@@ -128,7 +133,12 @@ impl Processor {
                     progress_bar.inc(1);
                     store
                         .entry(file.size)
-                        .and_modify(|fileset| fileset.push(file.clone()))
+                        .and_modify(|fileset| {
+                            // Only add if this path doesn't already exist in the fileset
+                            if !fileset.iter().any(|f| f.path == file.path) {
+                                fileset.push(file.clone());
+                            }
+                        })
                         .or_insert_with(|| vec![file]);
                     continue;
                 }
@@ -167,7 +177,12 @@ impl Processor {
                 Ok(hash) => {
                     duplicates_table
                         .entry(hash)
-                        .and_modify(|fileset| fileset.push(file.clone()))
+                        .and_modify(|fileset| {
+                            // Only add if this path doesn't already exist in the fileset
+                            if !fileset.iter().any(|f| f.path == file.path) {
+                                fileset.push(file.clone());
+                            }
+                        })
                         .or_insert_with(|| vec![file.clone()]);
                 }
                 Err(e) => {
