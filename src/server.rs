@@ -9,7 +9,7 @@ use indicatif::{MultiProgress, ProgressDrawTarget};
 use rand::Rng;
 use threadpool::ThreadPool;
 
-use crate::fileinfo::FileInfo;
+use crate::fileinfo::{FileInfo, FileSource};
 use crate::params::Params;
 
 pub struct Server {
@@ -34,6 +34,23 @@ impl Server {
     }
 
     pub fn start(&self) -> Result<()> {
+        // In comparison mode, scan both staging and target directories first
+        if self.app_args.comparison_mode {
+            let staging_dir = self.app_args.get_staging_directory()?;
+            let target_dir = self.app_args.get_target_directory()?;
+
+            let scanner = Scanner::build(&self.app_args)?;
+            
+            let mut staging_files = scanner.scan_with_source(staging_dir, FileSource::Staging)?;
+            let mut target_files = scanner.scan_with_source(target_dir, FileSource::Target)?;
+
+            // Combine all files and populate the queue
+            staging_files.append(&mut target_files);
+            {
+                let mut queue = self.filequeue.lock().unwrap();
+                *queue = staging_files;
+            }
+        }
         let progbarbox = Arc::new(MultiProgress::new());
         let mut rng = rand::rng();
         let seed: i64 = rng.random();
@@ -51,7 +68,8 @@ impl Server {
             Arc::clone(&self.filequeue),
             Arc::clone(&self.filequeue),
         );
-        let scanner_finished = Arc::new(AtomicBool::new(false));
+        
+        let scanner_finished = Arc::new(AtomicBool::new(self.app_args.comparison_mode));
         let sw_sort_finished = Arc::new(AtomicBool::new(false));
         let (sfin_sc, sfin_pr) = (
             Arc::clone(&scanner_finished),
@@ -73,14 +91,16 @@ impl Server {
             Arc::clone(&progbarbox),
         );
 
-        self.threadpool.execute(move || {
-            Scanner::new(app_args_sc)
-                .expect("unable to initialize scanner.")
-                .scan(file_queue_sc, prog_sc)
-                .expect("scanner failed.");
+        if !self.app_args.comparison_mode {
+            self.threadpool.execute(move || {
+                Scanner::new(app_args_sc)
+                    .expect("unable to initialize scanner.")
+                    .scan(file_queue_sc, prog_sc)
+                    .expect("scanner failed.");
 
-            sfin_sc.store(true, std::sync::atomic::Ordering::Relaxed);
-        });
+                sfin_sc.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+        }
 
         self.threadpool.execute(move || {
             Processor::sizewise(
@@ -105,7 +125,7 @@ impl Server {
                 seed,
                 swfin_pr_hw,
             )
-            .expect("sizewise scanner failed.");
+            .expect("hashwise scanner failed.");
         });
 
         progbarbox.clear()?;

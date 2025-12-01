@@ -11,34 +11,17 @@ use anyhow::Result;
 use clap::Parser;
 use colored::Colorize;
 use params::Params;
-use processor::Processor;
-use scanner::Scanner;
 use std::fs;
 use std::sync::atomic::Ordering;
 
-use crate::fileinfo::FileSource;
-
 fn main() -> Result<()> {
     let app_args = Params::parse();
+    let server = Server::new(app_args.clone());
+    server.start()?;
 
     if app_args.comparison_mode {
-        // Comparison mode: scan both staging and target directories
-        let staging_dir = app_args.get_staging_directory()?;
-        let target_dir = app_args.get_target_directory()?;
-
-        let scanner = Scanner::build(&app_args)?;
-        
-        let mut staging_files = scanner.scan_with_source(staging_dir, FileSource::Staging)?;
-        let mut target_files = scanner.scan_with_source(target_dir, FileSource::Target)?;
-
-        // Combine all files for processing
-        staging_files.append(&mut target_files);
-        let all_files = staging_files;
-
-        let processor = Processor::new(all_files);
-        // In comparison mode, we hash all files (not just duplicates) to find files
-        // that exist in both staging and target folders
-        let comparison_result = processor.comparison_mode()?;
+        // Analyze the results for comparison between staging and target
+        let comparison_result = processor::Processor::analyze_comparison(server.hw_duplicate_set.clone())?;
 
         // Print warnings
         if !comparison_result.warnings.is_empty() {
@@ -80,11 +63,6 @@ fn main() -> Result<()> {
             println!("\n{}", "No duplicates found between staging and target folders.".green());
         }
     } else {
-        // Normal mode: use Server architecture
-        let server = Server::new(app_args.clone());
-
-        server.start()?;
-
         match app_args.interactive {
             false => {
                 Formatter::print(

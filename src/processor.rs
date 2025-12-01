@@ -7,7 +7,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, TryLockError, TryLockResult};
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
-use rand::Rng;
 
 use crate::fileinfo::{FileInfo, FileSource};
 use crate::params::Params;
@@ -18,14 +17,9 @@ pub struct ComparisonResult {
     pub warnings: Vec<String>,
 }
 
-pub struct Processor {
-    pub files: Vec<FileInfo>,
-}
+pub struct Processor;
 
 impl Processor {
-    pub fn new(files: Vec<FileInfo>) -> Self {
-        Self { files }
-    }
     pub fn hashwise(
         app_args: Arc<Params>,
         sw_store: Arc<DashMap<u64, Vec<FileInfo>>>,
@@ -153,53 +147,22 @@ impl Processor {
         }
     }
 
-    pub fn comparison_mode(&self) -> Result<ComparisonResult> {
-        if self.files.is_empty() {
-            return Ok(ComparisonResult {
-                files_to_delete: vec![],
-                warnings: vec![],
-            });
-        }
-
-        let progress_style = ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")?;
-        let progress_bar = ProgressBar::new(self.files.len() as u64);
-        progress_bar.set_style(progress_style);
-        progress_bar.enable_steady_tick(Duration::from_millis(50));
-        progress_bar.set_message("indexing file hashes");
-
-        let mut rng = rand::rng();
-        let seed: i64 = rng.random();
-        let duplicates_table: DashMap<u128, Vec<FileInfo>> = DashMap::new();
-        
-        for file in &self.files {
-            progress_bar.inc(1);
-            match file.hash(seed) {
-                Ok(hash) => {
-                    duplicates_table
-                        .entry(hash)
-                        .and_modify(|fileset| {
-                            // Only add if this path doesn't already exist in the fileset
-                            if !fileset.iter().any(|f| f.path == file.path) {
-                                fileset.push(file.clone());
-                            }
-                        })
-                        .or_insert_with(|| vec![file.clone()]);
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to hash file {}: {}", file.path.display(), e);
-                }
-            }
-        }
-        progress_bar.finish_with_message("indexed files hashes");
-
+    /// Analyzes the hash-wise duplicate set to find files that exist in both staging and target.
+    /// This method operates on the already-processed hash groups from the Server pipeline.
+    pub fn analyze_comparison(
+        hw_duplicate_set: Arc<DashMap<u128, Vec<FileInfo>>>,
+    ) -> Result<ComparisonResult> {
         let mut files_to_delete = Vec::new();
         let mut warnings = Vec::new();
 
-        for (_hash, group) in duplicates_table.into_iter() {
-            let staging_files: Vec<&FileInfo> = group.iter()
+        for entry in hw_duplicate_set.iter() {
+            let group = entry.value();
+            let staging_files: Vec<&FileInfo> = group
+                .iter()
                 .filter(|f| f.source == Some(FileSource::Staging))
                 .collect();
-            let target_files: Vec<&FileInfo> = group.iter()
+            let target_files: Vec<&FileInfo> = group
+                .iter()
                 .filter(|f| f.source == Some(FileSource::Target))
                 .collect();
 
