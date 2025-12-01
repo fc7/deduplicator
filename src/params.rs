@@ -36,9 +36,7 @@ pub struct Params {
     /// Show Progress spinners & metrics
     #[arg(long, short = 'p', default_value = "false")]
     pub progress: bool,
-    /// print json output
-    #[arg(long)]
-    pub json: bool,
+
     /// Comparison mode: compares staging folder (scan_dir_path) with target folder (--target-dir).
     /// Files that exist in both folders (by hash) will be removed from staging and kept in target.
     /// If multiple instances exist in target, a warning will be shown.
