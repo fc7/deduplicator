@@ -40,7 +40,7 @@ impl Scanner {
             max_depth: app_args.max_depth,
             min_size: app_args.get_min_size(),
             follow_links: app_args.follow_links,
-            progress: false, // Don't show progress for comparison mode
+            progress: false,
         })
     }
 
@@ -117,9 +117,10 @@ impl Scanner {
         }
     }
     fn build_walker(&self) -> Result<GlobWalker> {
+        let patterns = self.scan_patterns()?;
         let walker = Ok(GlobWalkerBuilder::from_patterns(
             self.directory.clone(),
-            &self.scan_patterns()?,
+            &patterns,
         ))
         .and_then(|walker| self.attach_walker_min_depth(walker))
         .and_then(|walker| self.attach_walker_max_depth(walker))
@@ -167,6 +168,7 @@ mod tests {
     use crate::fileinfo::FileInfo;
     use crate::params::Params;
     use std::fs::File;
+    use std::io::Write;
     use std::sync::{Arc, Mutex};
 
     use super::Scanner;
@@ -185,14 +187,18 @@ mod tests {
         ]
         .iter()
         .for_each(|path| {
-            File::create_new(root.path().join(path)).unwrap_or_else(|_| {
+            let mut file = File::create_new(root.path().join(path)).unwrap_or_else(|_| {
                 panic!("unable to create file {path}");
+            });
+            file.write_all(b"test").unwrap_or_else(|_| {
+                panic!("unable to write to file {path}");
             });
         });
 
         let params = Params {
             types: Some(String::from("js,csv")),
             dir: Some(root.path().into()),
+            min_size: Some("0b".to_string()),
             ..Default::default()
         };
 
@@ -205,18 +211,19 @@ mod tests {
             .expect("scanning failed.");
 
         let scan_list_mg = scanlist.lock().unwrap();
+        
+        let expected_js = std::fs::canonicalize(root.path().join("this-is-a-js-file.js")).unwrap();
+        let expected_csv = std::fs::canonicalize(root.path().join("this-is-a-csv-file.csv")).unwrap();
+        let expected_css = std::fs::canonicalize(root.path().join("this-is-a-css-file.css")).unwrap();
+        let expected_rs = std::fs::canonicalize(root.path().join("this-is-a-rust-file.rs")).unwrap();
 
-        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
-            == root.path().join("this-is-a-js-file.js").to_str().unwrap()));
+        assert!(scan_list_mg.iter().any(|f| f.path.as_ref() == expected_js.as_path()));
 
-        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
-            == root.path().join("this-is-a-csv-file.csv").to_str().unwrap()));
+        assert!(scan_list_mg.iter().any(|f| f.path.as_ref() == expected_csv.as_path()));
 
-        assert!(scan_list_mg.iter().all(|f| f.path.to_str().unwrap()
-            != root.path().join("this-is-a-css-file.css").to_str().unwrap()));
+        assert!(scan_list_mg.iter().all(|f| f.path.as_ref() != expected_css.as_path()));
 
-        assert!(scan_list_mg.iter().all(|f| f.path.to_str().unwrap()
-            != root.path().join("this-is-a-rust-file.rs").to_str().unwrap()));
+        assert!(scan_list_mg.iter().all(|f| f.path.as_ref() != expected_rs.as_path()));
     }
 
     #[test]
@@ -231,14 +238,18 @@ mod tests {
         ]
         .iter()
         .for_each(|path| {
-            File::create_new(root.path().join(path)).unwrap_or_else(|_| {
+            let mut file = File::create_new(root.path().join(path)).unwrap_or_else(|_| {
                 panic!("unable to create file {path}");
+            });
+            file.write_all(b"test").unwrap_or_else(|_| {
+                panic!("unable to write to file {path}");
             });
         });
 
         let params = Params {
             exclude_types: Some(String::from("js,csv")),
             dir: Some(root.path().into()),
+            min_size: Some("0b".to_string()),
             ..Default::default()
         };
 
@@ -252,17 +263,18 @@ mod tests {
 
         let scan_list_mg = scanlist.lock().unwrap();
 
-        assert!(scan_list_mg.iter().all(|f| f.path.to_str().unwrap()
-            != root.path().join("this-is-a-js-file.js").to_str().unwrap()));
+        let expected_js = std::fs::canonicalize(root.path().join("this-is-a-js-file.js")).unwrap();
+        let expected_csv = std::fs::canonicalize(root.path().join("this-is-a-csv-file.csv")).unwrap();
+        let expected_css = std::fs::canonicalize(root.path().join("this-is-a-css-file.css")).unwrap();
+        let expected_rs = std::fs::canonicalize(root.path().join("this-is-a-rust-file.rs")).unwrap();
 
-        assert!(scan_list_mg.iter().all(|f| f.path.to_str().unwrap()
-            != root.path().join("this-is-a-csv-file.csv").to_str().unwrap()));
+        assert!(scan_list_mg.iter().all(|f| f.path.as_ref() != expected_js.as_path()));
 
-        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
-            == root.path().join("this-is-a-css-file.css").to_str().unwrap()));
+        assert!(scan_list_mg.iter().all(|f| f.path.as_ref() != expected_csv.as_path()));
 
-        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
-            == root.path().join("this-is-a-rust-file.rs").to_str().unwrap()));
+        assert!(scan_list_mg.iter().any(|f| f.path.as_ref() == expected_css.as_path()));
+
+        assert!(scan_list_mg.iter().any(|f| f.path.as_ref() == expected_rs.as_path()));
     }
 
     #[test]
@@ -277,8 +289,11 @@ mod tests {
         ]
         .iter()
         .for_each(|path| {
-            File::create_new(root.path().join(path)).unwrap_or_else(|_| {
+            let mut file = File::create_new(root.path().join(path)).unwrap_or_else(|_| {
                 panic!("unable to create file {path}");
+            });
+            file.write_all(b"test").unwrap_or_else(|_| {
+                panic!("unable to write to file {path}");
             });
         });
 
@@ -286,6 +301,7 @@ mod tests {
             types: Some(String::from("js,csv,rs")),
             exclude_types: Some(String::from("csv")),
             dir: Some(root.path().into()),
+            min_size: Some("0b".to_string()),
             ..Default::default()
         };
 
@@ -299,13 +315,14 @@ mod tests {
 
         let scan_list_mg = scanlist.lock().unwrap();
 
-        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
-            == root.path().join("this-is-a-js-file.js").to_str().unwrap()));
+        let expected_js = std::fs::canonicalize(root.path().join("this-is-a-js-file.js")).unwrap();
+        let expected_csv = std::fs::canonicalize(root.path().join("this-is-a-csv-file.csv")).unwrap();
+        let expected_rs = std::fs::canonicalize(root.path().join("this-is-a-rust-file.rs")).unwrap();
 
-        assert!(scan_list_mg.iter().all(|f| f.path.to_str().unwrap()
-            != root.path().join("this-is-a-csv-file.csv").to_str().unwrap()));
+        assert!(scan_list_mg.iter().any(|f| f.path.as_ref() == expected_js.as_path()));
 
-        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
-            == root.path().join("this-is-a-rust-file.rs").to_str().unwrap()));
+        assert!(scan_list_mg.iter().all(|f| f.path.as_ref() != expected_csv.as_path()));
+
+        assert!(scan_list_mg.iter().any(|f| f.path.as_ref() == expected_rs.as_path()));
     }
 }
