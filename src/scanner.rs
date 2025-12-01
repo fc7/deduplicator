@@ -1,118 +1,51 @@
-#![allow(unused)]
 use crate::{fileinfo::FileInfo, params::Params};
 use anyhow::Result;
-use indicatif::{ProgressBar, ProgressStyle};
-use std::{fs, path::PathBuf, time::Duration};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use std::sync::{Arc, Mutex};
+use std::{path::Path, time::Duration};
 
 use globwalk::{GlobWalker, GlobWalkerBuilder};
 
-#[derive(Debug, Clone)]
 pub struct Scanner {
-    pub directory: Option<PathBuf>,
-    pub filetypes: Option<String>,
+    pub directory: Box<Path>,
     pub min_depth: Option<usize>,
     pub max_depth: Option<usize>,
+    pub include_types: Option<String>,
+    pub exclude_types: Option<String>,
     pub min_size: Option<u64>,
     pub follow_links: bool,
+    pub progress: bool,
 }
 
 impl Scanner {
-    pub fn new() -> Self {
-        Self {
-            directory: None,
-            filetypes: None,
-            min_depth: None,
-            max_depth: None,
-            min_size: None,
-            follow_links: true,
-        }
-    }
-
-    pub fn build(app_args: &Params) -> Result<Self> {
-        let scan_directory = app_args.get_directory()?;
-        Ok(Scanner::new())
-            .map(|scanner| scanner.directory(scan_directory))
-            .map(|scanner| match app_args.get_min_size() {
-                Some(min_size) => scanner.min_size(min_size),
-                None => scanner,
-            })
-            .map(|scanner| match app_args.get_types() {
-                Some(ftypes) => scanner.filetypes(ftypes),
-                None => scanner,
-            })
-            .map(|scanner| match app_args.min_depth {
-                Some(min_depth) => scanner.min_depth(min_depth),
-                None => scanner,
-            })
-            .map(|scanner| match app_args.max_depth {
-                Some(max_depth) => scanner.max_depth(max_depth),
-                None => scanner,
-            })
-    }
-
-    pub fn min_size(&self, min_size: u64) -> Self {
-        Self {
-            min_size: Some(min_size),
-            ..self.clone()
-        }
-    }
-
-    pub fn min_depth(&self, min_depth: usize) -> Self {
-        Self {
-            min_depth: Some(min_depth),
-            ..self.clone()
-        }
-    }
-
-    pub fn max_depth(&self, max_depth: usize) -> Self {
-        Self {
-            max_depth: Some(max_depth),
-            ..self.clone()
-        }
-    }
-
-    pub fn directory(&self, dir: PathBuf) -> Self {
-        Self {
-            directory: Some(dir),
-            ..self.clone()
-        }
-    }
-
-    pub fn filetypes(&self, patterns: String) -> Self {
-        Self {
-            filetypes: Some(patterns),
-            ..self.clone()
-        }
-    }
-
-    pub fn ignore_links(&self) -> Self {
-        Self {
-            follow_links: false,
-            ..self.clone()
-        }
-    }
-
-    pub fn follow_links(&self) -> Self {
-        Self {
-            follow_links: true,
-            ..self.clone()
-        }
-    }
-
-    fn scan_patterns(&self) -> Result<String> {
-        Ok(match self.filetypes.clone() {
-            Some(ftypes) => format!("**/*{{{ftypes}}}"),
-            None => "**/*".to_string(),
+    pub fn new(app_args: Arc<Params>) -> Result<Self> {
+        Ok(Self {
+            directory: app_args.get_directory()?.into_boxed_path(),
+            include_types: app_args.types.clone(),
+            exclude_types: app_args.exclude_types.clone(),
+            min_depth: app_args.min_depth,
+            max_depth: app_args.max_depth,
+            min_size: app_args.get_min_size(),
+            follow_links: app_args.follow_links,
+            progress: app_args.progress,
         })
     }
 
-    fn scan_dir(&self) -> Result<PathBuf> {
-        let scan_dir = match self.directory.clone() {
-            Some(path) => path,
-            None => std::env::current_dir()?,
+    fn scan_patterns(&self) -> Result<Vec<String>> {
+        let include_types = match &self.include_types {
+            Some(ftypes) => Some(format!("**/*.{{{ftypes}}}")),
+            None => Some("**/*".to_string()),
         };
 
-        Ok(fs::canonicalize(scan_dir)?)
+        let exclude_types = self
+            .exclude_types
+            .as_ref()
+            .map(|ftypes| format!("!**/*.{{{ftypes}}}"));
+
+        Ok(vec![include_types, exclude_types]
+            .into_iter()
+            .flatten()
+            .collect())
     }
 
     fn attach_link_opts(&self, walker: GlobWalkerBuilder) -> Result<GlobWalkerBuilder> {
@@ -134,8 +67,8 @@ impl Scanner {
     }
     fn build_walker(&self) -> Result<GlobWalker> {
         let walker = Ok(GlobWalkerBuilder::from_patterns(
-            self.scan_dir()?,
-            &[self.scan_patterns()?],
+            self.directory.clone(),
+            &self.scan_patterns()?,
         ))
         .and_then(|walker| self.attach_walker_min_depth(walker))
         .and_then(|walker| self.attach_walker_max_depth(walker))
@@ -144,30 +77,184 @@ impl Scanner {
         Ok(walker.build()?)
     }
 
-    pub fn scan(&self) -> Result<Vec<FileInfo>> {
+    pub fn scan(
+        &self,
+        files: Arc<Mutex<Vec<FileInfo>>>,
+        progress_bar_box: Arc<MultiProgress>,
+    ) -> Result<()> {
+        let progress_bar = match self.progress {
+            true => progress_bar_box.add(ProgressBar::new_spinner()),
+            false => ProgressBar::hidden(),
+        };
+
         let progress_style = ProgressStyle::with_template("[{elapsed_precise}] {pos:>7} {msg}")?;
-        let progress_bar = ProgressBar::new_spinner();
         progress_bar.set_style(progress_style);
         progress_bar.enable_steady_tick(Duration::from_millis(50));
         progress_bar.set_message("paths mapped");
-        let min_size = self.min_size.unwrap_or_default();
+        let min_size = self.min_size.unwrap_or(0);
 
-        let results = self
-            .build_walker()?
+        self.build_walker()?
             .filter_map(Result::ok)
             .map(|entity| entity.into_path())
-            .map(|path| {
-                progress_bar.inc(1);
-                path
-            })
+            .inspect(|_path| progress_bar.inc(1))
             .filter(|path| path.is_file())
             .map(FileInfo::new)
             .filter_map(Result::ok)
-            .filter(|file| file.size > min_size)
-            .collect::<Vec<FileInfo>>();
+            .filter(|file| file.size >= min_size)
+            .for_each(|file| {
+                let mut flock = files.lock().unwrap();
+                flock.push(file);
+            });
 
         progress_bar.finish_with_message("paths mapped");
+        Ok(())
+    }
+}
 
-        Ok(results)
+#[cfg(test)]
+mod tests {
+    use crate::fileinfo::FileInfo;
+    use crate::params::Params;
+    use std::fs::File;
+    use std::sync::{Arc, Mutex};
+
+    use super::Scanner;
+    use indicatif::MultiProgress;
+    use tempfile::TempDir;
+
+    #[test]
+    fn ensure_file_include_type_filter_includes_expected_file_types() {
+        let root =
+            TempDir::with_prefix("deduplicator_test_root").expect("unable to create tempdir");
+        [
+            "this-is-a-js-file.js",
+            "this-is-a-css-file.css",
+            "this-is-a-csv-file.csv",
+            "this-is-a-rust-file.rs",
+        ]
+        .iter()
+        .for_each(|path| {
+            File::create_new(root.path().join(path)).unwrap_or_else(|_| {
+                panic!("unable to create file {path}");
+            });
+        });
+
+        let params = Params {
+            types: Some(String::from("js,csv")),
+            dir: Some(root.path().into()),
+            ..Default::default()
+        };
+
+        let progress = Arc::new(MultiProgress::new());
+        let scanlist = Arc::new(Mutex::<Vec<FileInfo>>::new(vec![]));
+        let scanner = Scanner::new(Arc::new(params)).expect("scanner initialization failed");
+
+        scanner
+            .scan(scanlist.clone(), progress)
+            .expect("scanning failed.");
+
+        let scan_list_mg = scanlist.lock().unwrap();
+
+        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
+            == root.path().join("this-is-a-js-file.js").to_str().unwrap()));
+
+        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
+            == root.path().join("this-is-a-csv-file.csv").to_str().unwrap()));
+
+        assert!(scan_list_mg.iter().all(|f| f.path.to_str().unwrap()
+            != root.path().join("this-is-a-css-file.css").to_str().unwrap()));
+
+        assert!(scan_list_mg.iter().all(|f| f.path.to_str().unwrap()
+            != root.path().join("this-is-a-rust-file.rs").to_str().unwrap()));
+    }
+
+    #[test]
+    fn ensure_file_exclude_type_filter_excludes_expected_file_types() {
+        let root =
+            TempDir::with_prefix("deduplicator_test_root").expect("unable to create tempdir");
+        [
+            "this-is-a-js-file.js",
+            "this-is-a-css-file.css",
+            "this-is-a-csv-file.csv",
+            "this-is-a-rust-file.rs",
+        ]
+        .iter()
+        .for_each(|path| {
+            File::create_new(root.path().join(path)).unwrap_or_else(|_| {
+                panic!("unable to create file {path}");
+            });
+        });
+
+        let params = Params {
+            exclude_types: Some(String::from("js,csv")),
+            dir: Some(root.path().into()),
+            ..Default::default()
+        };
+
+        let progress = Arc::new(MultiProgress::new());
+        let scanlist = Arc::new(Mutex::<Vec<FileInfo>>::new(vec![]));
+        let scanner = Scanner::new(Arc::new(params)).expect("scanner initialization failed");
+
+        scanner
+            .scan(scanlist.clone(), progress)
+            .expect("scanning failed.");
+
+        let scan_list_mg = scanlist.lock().unwrap();
+
+        assert!(scan_list_mg.iter().all(|f| f.path.to_str().unwrap()
+            != root.path().join("this-is-a-js-file.js").to_str().unwrap()));
+
+        assert!(scan_list_mg.iter().all(|f| f.path.to_str().unwrap()
+            != root.path().join("this-is-a-csv-file.csv").to_str().unwrap()));
+
+        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
+            == root.path().join("this-is-a-css-file.css").to_str().unwrap()));
+
+        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
+            == root.path().join("this-is-a-rust-file.rs").to_str().unwrap()));
+    }
+
+    #[test]
+    fn complex_file_type_params() {
+        let root =
+            TempDir::with_prefix("deduplicator_test_root").expect("unable to create tempdir");
+        [
+            "this-is-a-js-file.js",
+            "this-is-a-css-file.css",
+            "this-is-a-csv-file.csv",
+            "this-is-a-rust-file.rs",
+        ]
+        .iter()
+        .for_each(|path| {
+            File::create_new(root.path().join(path)).unwrap_or_else(|_| {
+                panic!("unable to create file {path}");
+            });
+        });
+
+        let params = Params {
+            types: Some(String::from("js,csv,rs")),
+            exclude_types: Some(String::from("csv")),
+            dir: Some(root.path().into()),
+            ..Default::default()
+        };
+
+        let progress = Arc::new(MultiProgress::new());
+        let scanlist = Arc::new(Mutex::<Vec<FileInfo>>::new(vec![]));
+        let scanner = Scanner::new(Arc::new(params)).expect("scanner initialization failed");
+
+        scanner
+            .scan(scanlist.clone(), progress)
+            .expect("scanning failed.");
+
+        let scan_list_mg = scanlist.lock().unwrap();
+
+        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
+            == root.path().join("this-is-a-js-file.js").to_str().unwrap()));
+
+        assert!(scan_list_mg.iter().all(|f| f.path.to_str().unwrap()
+            != root.path().join("this-is-a-csv-file.csv").to_str().unwrap()));
+
+        assert!(scan_list_mg.iter().any(|f| f.path.to_str().unwrap()
+            == root.path().join("this-is-a-rust-file.rs").to_str().unwrap()));
     }
 }

@@ -1,33 +1,25 @@
-pub struct Formatter;
-use crate::fileinfo::FileInfo;
-use crate::params::Params;
+use crate::{fileinfo::FileInfo, params::Params};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use colored::Colorize;
 use dashmap::DashMap;
-use indicatif::{
-    ParallelProgressIterator, ProgressBar, ProgressFinish, ProgressIterator, ProgressStyle,
-};
 use pathdiff::diff_paths;
-use prettytable::{format, row, Table};
 use rayon::prelude::*;
-use std::borrow::Cow;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::sync::atomic::AtomicU64;
+use std::{path::PathBuf, sync::Arc};
 
+const YELLOW: &str = "\x1b[33m";
+const RESET: &str = "\x1b[0m";
+
+pub struct Formatter;
 impl Formatter {
-    pub fn human_path(
-        file: &FileInfo,
-        app_args: &Params,
-        min_path_length: usize,
-    ) -> Result<String> {
-        let base_directory: PathBuf = app_args.get_directory()?;
-        let relative_path = diff_paths(file.path.clone(), base_directory).unwrap_or_default();
+    pub fn human_path(file: &FileInfo, aargs: &Params, max_path_length: usize) -> Result<String> {
+        let base_directory: PathBuf = aargs.get_directory()?;
+        let relative_path = diff_paths(&file.path, base_directory).unwrap_or_default();
 
         let formatted_path = format!(
             "{:<0width$}",
             relative_path.to_str().unwrap_or_default().to_string(),
-            width = min_path_length
+            width = max_path_length
         );
 
         Ok(formatted_path)
@@ -38,97 +30,51 @@ impl Formatter {
     }
 
     pub fn human_mtime(file: &FileInfo) -> Result<String> {
-        let modified_time: DateTime<Utc> = file.filemeta.modified()?.into();
+        let modified_time: DateTime<Utc> = file.modified.into();
         Ok(modified_time.format("%Y-%m-%d %H:%M:%S").to_string())
     }
 
-    pub fn generate_table(raw: Vec<FileInfo>, app_args: &Params) -> Result<Table> {
-        let basepath_length = app_args.get_directory()?.to_str().unwrap_or_default().len();
-        let max_filepath_length = raw
-            .iter()
-            .map(|file| file.path.to_str().unwrap_or_default().len())
-            .max()
-            .unwrap_or_default();
+    pub fn print(raw: Arc<DashMap<u128, Vec<FileInfo>>>, max_path_len: u64, aargs: &Params) {
+        print!("{}", "\n".repeat(if aargs.progress { 2 } else { 1 })); // spacing
 
-        let min_path_length = if max_filepath_length > basepath_length {
-            max_filepath_length - basepath_length
-        } else {
-            0
-        };
-
-        let progress_style = ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-        )?;
-        let progress_bar = ProgressBar::new(raw.len() as u64);
-        progress_bar.set_style(progress_style);
-        progress_bar.enable_steady_tick(Duration::from_millis(50));
-        progress_bar.set_message("reconciling data");
-
-        let duplicates_table: DashMap<String, Vec<FileInfo>> = DashMap::new();
-        raw.into_par_iter()
-            .progress_with(progress_bar)
-            .with_finish(ProgressFinish::WithMessage(Cow::from("data reconciled")))
-            .map(|file| file.hash())
-            .filter_map(Result::ok)
-            .for_each(|file| {
-                duplicates_table
-                    .entry(file.hash.clone().unwrap_or_default())
-                    .and_modify(|fileset| fileset.push(file.clone()))
-                    .or_insert_with(|| vec![file]);
-            });
-
-        let mut output_table = Table::new();
-        output_table.set_titles(row!["hash", "duplicates"]);
-
-        let progress_style = ProgressStyle::with_template(
-            "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
-        )?;
-
-        let progress_bar = ProgressBar::new(duplicates_table.len() as u64);
-        progress_bar.set_style(progress_style);
-        progress_bar.enable_steady_tick(Duration::from_millis(50));
-        progress_bar.set_message("generating output");
-
-        duplicates_table
-            .into_iter()
-            .progress_with(progress_bar)
-            .with_finish(ProgressFinish::WithMessage(Cow::from("output generated")))
-            .for_each(|(hash, group)| {
-                let mut inner_table = Table::new();
-                inner_table.set_format(*format::consts::FORMAT_NO_BORDER_LINE_SEPARATOR);
-                group.iter().for_each(|file| {
-                    inner_table.add_row(row![
-                        Self::human_path(file, app_args, min_path_length)
-                            .unwrap_or_default()
-                            .blue(),
-                        Self::human_filesize(file).unwrap_or_default().red(),
-                        Self::human_mtime(file).unwrap_or_default().yellow()
-                    ]);
-                });
-
-                output_table.add_row(row![hash.green(), inner_table]);
-            });
-
-        Ok(output_table)
-    }
-
-    pub fn print(raw: Vec<FileInfo>, app_args: &Params) -> Result<()> {
         if raw.is_empty() {
-            println!(
-                "\n\n{}\n",
-                "No duplicates found matching your search criteria.".green()
-            );
-            return Ok(());
-        }
-
-        if app_args.json {
-            let output_json = serde_json::to_string_pretty(&raw)?;
-            println!("{}", output_json);
+            println!("No duplicates found matching your search criteria.");
         } else {
-            let output_table = Self::generate_table(raw, app_args)?;
-            output_table.printstd();
-        }
+            let printed_count: AtomicU64 = AtomicU64::new(0);
 
-        Ok(())
+            raw.par_iter().for_each(|sref| {
+                if sref.value().len() > 1 {
+                    printed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let mut ostring = format!("{}{:32x}{}\n", YELLOW, sref.key(), RESET);
+                    let subfields = sref
+                        .value()
+                        .par_iter()
+                        .enumerate()
+                        .map(|(i, finfo)| {
+                            let nodechar = if i == sref.value().len() - 1 {
+                                "└─"
+                            } else {
+                                "├─"
+                            };
+                            format!(
+                                "{}\t{}\t{}\t{}\n",
+                                nodechar,
+                                Self::human_path(finfo, aargs, max_path_len as usize)
+                                    .expect("path formatting failed."),
+                                Self::human_filesize(finfo).expect("filesize formatting failed."),
+                                Self::human_mtime(finfo).expect("modified time formatting failed.")
+                            )
+                        })
+                        .collect::<String>();
+
+                    ostring.push_str(&subfields);
+                    println!("{ostring}");
+                }
+            });
+
+            if printed_count.load(std::sync::atomic::Ordering::Relaxed) < 1 {
+                println!("No duplicates found matching your search criteria.");
+            }
+        }
     }
 }
