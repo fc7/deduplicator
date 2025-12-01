@@ -3,6 +3,7 @@ use gxhash::gxhash128;
 use memmap2::Mmap;
 use std::{
     fs,
+    fs::Metadata,
     io::Read,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -15,12 +16,20 @@ pub enum FileState {
     SwProcessed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSource {
+    Staging,
+    Target,
+}
+
 #[derive(Debug, Clone)]
 pub struct FileInfo {
     pub path: Box<Path>,
     pub size: u64,
     pub modified: SystemTime,
     pub state: Arc<Mutex<FileState>>,
+    pub filemeta: Option<Metadata>,
+    pub source: Option<FileSource>,
 }
 
 impl FileInfo {
@@ -54,7 +63,15 @@ impl FileInfo {
             size: filemeta.len(),
             modified: filemeta.modified()?,
             state: Arc::new(Mutex::new(FileState::Unprocessed)),
+            filemeta: Some(filemeta),
+            source: None,
         })
+    }
+
+    pub fn with_source(path: PathBuf, source: FileSource) -> Result<Self> {
+        let mut file_info = Self::new(path)?;
+        file_info.source = Some(source);
+        Ok(file_info)
     }
 
     pub fn sw_processed(&self) {

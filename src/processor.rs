@@ -7,13 +7,25 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, TryLockError, TryLockResult};
 use std::time::Duration;
 use unicode_segmentation::UnicodeSegmentation;
+use rand::Rng;
 
-use crate::fileinfo::FileInfo;
+use crate::fileinfo::{FileInfo, FileSource};
 use crate::params::Params;
 
-pub struct Processor {}
+#[derive(Debug, Clone)]
+pub struct ComparisonResult {
+    pub files_to_delete: Vec<FileInfo>,
+    pub warnings: Vec<String>,
+}
+
+pub struct Processor {
+    pub files: Vec<FileInfo>,
+}
 
 impl Processor {
+    pub fn new(files: Vec<FileInfo>) -> Self {
+        Self { files }
+    }
     pub fn hashwise(
         app_args: Arc<Params>,
         sw_store: Arc<DashMap<u64, Vec<FileInfo>>>,
@@ -129,6 +141,75 @@ impl Processor {
                 },
             }
         }
+    }
+
+    pub fn comparison_mode(&self) -> Result<ComparisonResult> {
+        if self.files.is_empty() {
+            return Ok(ComparisonResult {
+                files_to_delete: vec![],
+                warnings: vec![],
+            });
+        }
+
+        let progress_style = ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")?;
+        let progress_bar = ProgressBar::new(self.files.len() as u64);
+        progress_bar.set_style(progress_style);
+        progress_bar.enable_steady_tick(Duration::from_millis(50));
+        progress_bar.set_message("indexing file hashes");
+
+        let mut rng = rand::rng();
+        let seed: i64 = rng.random();
+        let duplicates_table: DashMap<u128, Vec<FileInfo>> = DashMap::new();
+        
+        for file in &self.files {
+            progress_bar.inc(1);
+            match file.hash(seed) {
+                Ok(hash) => {
+                    duplicates_table
+                        .entry(hash)
+                        .and_modify(|fileset| fileset.push(file.clone()))
+                        .or_insert_with(|| vec![file.clone()]);
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to hash file {}: {}", file.path.display(), e);
+                }
+            }
+        }
+        progress_bar.finish_with_message("indexed files hashes");
+
+        let mut files_to_delete = Vec::new();
+        let mut warnings = Vec::new();
+
+        for (_hash, group) in duplicates_table.into_iter() {
+            let staging_files: Vec<&FileInfo> = group.iter()
+                .filter(|f| f.source == Some(FileSource::Staging))
+                .collect();
+            let target_files: Vec<&FileInfo> = group.iter()
+                .filter(|f| f.source == Some(FileSource::Target))
+                .collect();
+
+            // If file exists in both staging and target
+            if !staging_files.is_empty() && !target_files.is_empty() {
+                // Remove all instances from staging
+                files_to_delete.extend(staging_files.iter().map(|f| (*f).clone()));
+
+                // Warn if multiple instances in target
+                if target_files.len() > 1 {
+                    warnings.push(format!(
+                        "Warning: Hash has {} instances in target folder:",
+                        target_files.len()
+                    ));
+                    for target_file in &target_files {
+                        warnings.push(format!("  - {}", target_file.path.display()));
+                    }
+                }
+            }
+        }
+
+        Ok(ComparisonResult {
+            files_to_delete,
+            warnings,
+        })
     }
 }
 

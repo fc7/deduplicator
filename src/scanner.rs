@@ -1,8 +1,8 @@
-use crate::{fileinfo::FileInfo, params::Params};
+use crate::{fileinfo::{FileInfo, FileSource}, params::Params};
 use anyhow::Result;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::sync::{Arc, Mutex};
-use std::{path::Path, time::Duration};
+use std::{path::{Path, PathBuf}, time::Duration};
 
 use globwalk::{GlobWalker, GlobWalkerBuilder};
 
@@ -29,6 +29,57 @@ impl Scanner {
             follow_links: app_args.follow_links,
             progress: app_args.progress,
         })
+    }
+
+    pub fn build(app_args: &Params) -> Result<Self> {
+        Ok(Self {
+            directory: app_args.get_directory()?.into_boxed_path(),
+            include_types: app_args.types.clone(),
+            exclude_types: app_args.exclude_types.clone(),
+            min_depth: app_args.min_depth,
+            max_depth: app_args.max_depth,
+            min_size: app_args.get_min_size(),
+            follow_links: app_args.follow_links,
+            progress: false, // Don't show progress for comparison mode
+        })
+    }
+
+    pub fn scan_with_source(&self, directory: PathBuf, source: FileSource) -> Result<Vec<FileInfo>> {
+        let progress_style = ProgressStyle::with_template("[{elapsed_precise}] {pos:>7} {msg}")?;
+        let progress_bar = ProgressBar::new_spinner();
+        progress_bar.set_style(progress_style);
+        progress_bar.enable_steady_tick(Duration::from_millis(50));
+        progress_bar.set_message("paths mapped");
+        let min_size = self.min_size.unwrap_or(0);
+
+        // Create a temporary scanner with the specified directory
+        let temp_scanner = Self {
+            directory: directory.into_boxed_path(),
+            min_depth: self.min_depth,
+            max_depth: self.max_depth,
+            include_types: self.include_types.clone(),
+            exclude_types: self.exclude_types.clone(),
+            min_size: self.min_size,
+            follow_links: self.follow_links,
+            progress: self.progress,
+        };
+
+        let results = temp_scanner
+            .build_walker()?
+            .filter_map(Result::ok)
+            .map(|entity| entity.into_path())
+            .map(|path| {
+                progress_bar.inc(1);
+                path
+            })
+            .filter(|path| path.is_file())
+            .filter_map(|path| FileInfo::with_source(path, source).ok())
+            .filter(|file| file.size >= min_size)
+            .collect::<Vec<FileInfo>>();
+
+        progress_bar.finish_with_message("paths mapped");
+
+        Ok(results)
     }
 
     fn scan_patterns(&self) -> Result<Vec<String>> {

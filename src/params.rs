@@ -36,6 +36,18 @@ pub struct Params {
     /// Show Progress spinners & metrics
     #[arg(long, short = 'p', default_value = "false")]
     pub progress: bool,
+    /// print json output
+    #[arg(long)]
+    pub json: bool,
+    /// Comparison mode: compares staging folder (scan_dir_path) with target folder (--target-dir).
+    /// Files that exist in both folders (by hash) will be removed from staging and kept in target.
+    /// If multiple instances exist in target, a warning will be shown.
+    #[arg(long)]
+    pub comparison_mode: bool,
+    /// Target folder for comparison mode (required when --comparison-mode is used).
+    /// The staging folder is specified as the scan_dir_path argument.
+    #[arg(long, value_hint = ValueHint::DirPath, value_name = "target_dir_path")]
+    pub target_dir: Option<PathBuf>,
 }
 
 impl Params {
@@ -54,5 +66,23 @@ impl Params {
         let dir_path = self.dir.as_ref().unwrap_or(&current_dir).as_path();
         let dir = fs::canonicalize(dir_path)?;
         Ok(dir)
+    }
+
+    pub fn get_staging_directory(&self) -> Result<PathBuf> {
+        self.get_directory()
+    }
+
+    pub fn get_target_directory(&self) -> Result<PathBuf> {
+        match &self.target_dir {
+            Some(target_path) => {
+                let dir = fs::canonicalize(target_path)?;
+                Ok(dir)
+            }
+            None => anyhow::bail!("--target-dir is required when using --comparison-mode"),
+        }
+    }
+
+    pub fn get_types(&self) -> Option<String> {
+        self.types.clone()
     }
 }
